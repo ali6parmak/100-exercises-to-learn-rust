@@ -211,3 +211,291 @@ Whenever you need to store data on the heap, you ask a special program, the allo
 
 The heap is structured quite differently from the stack.
 Heap allocations are not contiguous, they can be located anywhere inside the heap.
+
+
+---
+
+The stack is great, but it can't solve all our problems. What about data whose size is not known at compile time? Collections, strings, and other dynamically-sized data cannot be (entirely) stack-allocated. That's where the heap comes in.
+
+When you create a local variable of type String, Rust is forced to allocate on the heap: it doesn't know in advance how much text you're going to put in it, so it can't reserve the right amount of space on the stack.
+But a String is not entirely heap-allocated, it also keeps some data on the stack. In particular:
+
+The pointer to the heap region you reserved.
+The length of the string, i.e. how many bytes are in the string.
+The capacity of the string, i.e. how many bytes have been reserved on the heap.
+Let's look at an example to understand this better:
+
+
+```rust
+let mut s = String::with_capacity(5);
+```
+
+```
+      +---------+--------+----------+
+Stack | pointer | length | capacity | 
+      |  |      |   0    |    5     |
+      +--|------+--------+----------+
+         |
+         |
+         v
+       +---+---+---+---+---+
+Heap:  | ? | ? | ? | ? | ? |
+       +---+---+---+---+---+
+```
+
+
+
+We asked for a String that can hold up to 5 bytes of text.
+String::with_capacity goes to the allocator and asks for 5 bytes of heap memory. The allocator returns a pointer to the start of that memory block.
+The String is empty, though. On the stack, we keep track of this information by distinguishing between the length and the capacity: this String can hold up to 5 bytes, but it currently holds 0 bytes of actual text.
+
+If you push some text into the String, the situation will change:
+
+
+```rust
+s.push_str("Hey");
+```
+
+
+```
+      +---------+--------+----------+
+Stack | pointer | length | capacity |
+      |  |      |   3    |    5     |
+      +--|  ----+--------+----------+
+         |
+         |
+         v
+       +---+---+---+---+---+
+Heap:  | H | e | y | ? | ? |
+       +---+---+---+---+---+
+```
+
+s now holds 3 bytes of text. Its length is updated to 3, but capacity remains 5. Three of the five bytes on the heap are used to store the characters H, e, and y.
+
+
+How much space do we need to store pointer, length and capacity on the stack?
+It depends on the architecture of the machine you're running on.
+
+Every memory location on your machine has an address, commonly represented as an unsigned integer. Depending on the maximum size of the address space (i.e. how much memory your machine can address), this integer can have a different size. Most modern machines use either a 32-bit or a 64-bit address space.
+
+Rust abstracts away these architecture-specific details by providing the usize type: an unsigned integer that's as big as the number of bytes needed to address memory on your machine. On a 32-bit machine, usize is equivalent to u32. On a 64-bit machine, it matches u64.
+
+Capacity, length and pointers are all represented as usizes in Rust2.
+
+
+e.g.
+
+```rust
+assert_eq!(size_of::<String>(), 24);
+```
+For a 64 bit machine, size_of::<String>() would become 24. Because, 64-bit = 8 byte, and String has composed of 3 usize fields (length, capacity, pointer) each being 8 bytes.
+(For a 32 bit machine, it would've been 12 bytes)
+
+
+---
+
+Most references1 in Rust are represented, in memory, as a pointer to a memory location.
+It follows that their size is the same as the size of a pointer, a usize.
+
+You can verify this using std::mem::size_of:
+
+
+```rust
+assert_eq!(std::mem::size_of::<&String>(), 8);
+assert_eq!(std::mem::size_of::<&mut String>(), 8);
+```
+
+A &String, in particular, is a pointer to the memory location where the String's metadata is stored.
+If you run this snippet:
+
+```rust
+let s = String::from("Hey");
+let r = &s;
+```
+
+you'll get something like this in memory:
+
+
+```
+           --------------------------------------
+           |                                    |
+      +----v----+--------+----------+      +----|----+
+Stack | pointer | length | capacity |      | pointer |
+      |  |      |   3    |    5     |      |         |
+      +--|  ----+--------+----------+      +---------+
+         |          s                           r
+         |
+         v
+       +---+---+---+---+---+
+Heap   | H | e | y | ? | ? |
+       +---+---+---+---+---+
+```
+
+It's a pointer to a pointer to the heap-allocated data, if you will. The same goes for &mut String.
+
+
+
+The example above should clarify one thing: not all pointers point to the heap.
+They just point to a memory location, which may be on the heap, but doesn't have to be.
+
+
+
+---
+
+When introducing the heap, we mentioned that you're responsible for freeing the memory you allocate.
+When introducing the borrow-checker, we also stated that you rarely have to manage memory directly in Rust.
+
+These two statements might seem contradictory at first. Let's see how they fit together by introducing scopes and destructors.
+
+
+The scope of a variable is the region of Rust code where that variable is valid, or alive.
+
+The scope of a variable starts with its declaration. It ends when one of the following happens:
+
+1. the block (i.e. the code between {}) where the variable was declared ends:
+```rust
+fn main() {
+   // `x` is not yet in scope here
+   let y = "Hello".to_string();
+   let x = "World".to_string(); // <-- x's scope starts here...
+   let h = "!".to_string(); //   |
+} //  <-------------- ...and ends here
+```
+
+
+2. ownership of the variable is transferred to someone else (e.g. a function or another variable):
+```rust
+fn compute(t: String) {
+   // Do something [...]
+}
+
+fn main() {
+    let s = "Hello".to_string(); // <-- s's scope starts here...
+                //                    | 
+    compute(s); // <------------------- ..and ends here
+                //   because `s` is moved into `compute`
+}
+```
+
+
+When the owner of a value goes out of scope, Rust invokes its destructor.
+The destructor tries to clean up the resources used by that value—in particular, whatever memory it allocated.
+
+You can manually invoke the destructor of a value by passing it to std::mem::drop.
+That's why you'll often hear Rust developers saying "that value has been dropped" as a way to state that a value has gone out of scope and its destructor has been invoked.
+
+
+We can insert explicit calls to drop to "spell out" what the compiler does for us. Going back to the previous example:
+
+
+```rust
+fn main() {
+   let y = "Hello".to_string();
+   let x = "World".to_string();
+   let h = "!".to_string();
+}
+```
+
+It's equivalent to:
+
+
+```rust
+fn main() {
+   let y = "Hello".to_string();
+   let x = "World".to_string();
+   let h = "!".to_string();
+   // Variables are dropped in reverse order of declaration
+   drop(h);
+   drop(x);
+   drop(y);
+}
+```
+
+
+Let's look at the second example instead, where s's ownership is transferred to compute:
+
+```rust
+fn compute(s: String) {
+   // Do something [...]
+}
+
+fn main() {
+   let s = "Hello".to_string();
+   compute(s);
+}
+```
+
+
+It's equivalent to this:
+
+
+```rust
+fn compute(t: String) {
+    // Do something [...]
+    drop(t); // <-- Assuming `t` wasn't dropped or moved 
+             //     before this point, the compiler will call 
+             //     `drop` here, when it goes out of scope
+}
+
+fn main() {
+    let s = "Hello".to_string();
+    compute(s);
+}
+```
+
+
+What if a variable contains a reference?
+For example:
+
+```rust
+let x = 42i32;
+let y = &x;
+drop(y);
+```
+
+When you call drop(y)... nothing happens. It just drops the pointer `y`, nothing happens to `x`.
+If you actually try to compile this code, you'll get a warning:
+
+```rust
+
+warning: calls to `std::mem::drop` with a reference 
+         instead of an owned value does nothing
+ --> src/main.rs:4:5
+  |
+4 |     drop(y);
+  |     ^^^^^-^
+  |          |
+  |          argument has type `&i32`
+  |
+```
+
+It goes back to what we said earlier: we only want to call the destructor once.
+You can have multiple references to the same value—if we called the destructor for the value they point at when one of them goes out of scope, what would happen to the others? They would refer to a memory location that's no longer valid: a so-called dangling pointer, a close relative of use-after-free bugs. Rust's ownership system rules out these kinds of bugs by design.
+
+
+---
+
+For types that implement `Copy` (all primitives: u32, i32, bool, f64, etc.), when you pass them to a function, Rust automatically copies the value instead of moving ownership. So the original variable is still valid after the call.
+
+
+```rust
+let x: u32 = 5;
+some_function(x);  // x is copied, not moved
+println!("{}", x); // ✅ x is still valid here
+```
+
+Compare this to a String, which does not implement Copy:
+
+```rust
+let s = String::from("hello");
+some_function(s);  // s is MOVED, ownership transferred
+println!("{}", s); // ❌ compile error! s was moved
+```
+
+That's why for String you either:
+
+- Pass a reference &String / &str (borrow it), or
+- Clone it (.clone()) if you need two owned copies
+
+
+
